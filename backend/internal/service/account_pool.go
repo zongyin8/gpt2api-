@@ -140,6 +140,9 @@ func (p *AccountPool) ReserveWhere(ctx context.Context, provider, strategy strin
 		if acc == nil {
 			break
 		}
+		if !shouldReserveAccount(acc) {
+			return acc, nil
+		}
 		if p.tryReserve(acc.ID) {
 			return acc, nil
 		}
@@ -147,21 +150,23 @@ func (p *AccountPool) ReserveWhere(ctx context.Context, provider, strategy strin
 	return nil, errcode.NoAvailableAcc
 }
 
-// MarkUsed 调度成功回写。
+// MarkUsed 调度成功回写。provider 由内部 accountIDProvider() 反查，调用方
+// 不需要关心。
 func (p *AccountPool) MarkUsed(ctx context.Context, accountID uint64) {
-	if err := p.repo.MarkUsed(ctx, accountID); err != nil {
+	provider := accountIDProvider(p, accountID)
+	if err := p.repo.MarkUsed(ctx, accountID, provider); err != nil {
 		logger.FromCtx(ctx).Warn("account.mark_used", zap.Uint64("id", accountID), zap.Error(err))
 	}
 }
 
 // MarkFailed 调度失败回写：reason 写入 last_error；cooldown>0 时进入熔断。
 func (p *AccountPool) MarkFailed(ctx context.Context, accountID uint64, reason string, cooldown time.Duration) {
-	if err := p.repo.MarkFailed(ctx, accountID, truncate(reason, 240), cooldown); err != nil {
+	provider := accountIDProvider(p, accountID)
+	if err := p.repo.MarkFailed(ctx, accountID, truncate(reason, 240), cooldown, provider); err != nil {
 		logger.FromCtx(ctx).Warn("account.mark_failed", zap.Uint64("id", accountID), zap.Error(err))
 	}
 	if cooldown > 0 {
-		// 熔断后强制下一次取重新加载
-		p.invalidate(accountIDProvider(p, accountID))
+		p.invalidate(provider)
 	}
 }
 
@@ -171,7 +176,8 @@ func (p *AccountPool) MarkTransientFailed(ctx context.Context, accountID uint64,
 	if accountID == 0 {
 		return
 	}
-	if err := p.repo.Update(ctx, accountID, map[string]any{
+	provider := accountIDProvider(p, accountID)
+	if err := p.repo.UpdateForProvider(ctx, accountID, provider, map[string]any{
 		"last_error": truncate(reason, 240),
 	}); err != nil {
 		logger.FromCtx(ctx).Warn("account.mark_transient_failed", zap.Uint64("id", accountID), zap.Error(err))
@@ -300,4 +306,11 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
+}
+
+func shouldReserveAccount(acc *model.Account) bool {
+	if shouldDirectConnectCustomUpstream(acc) {
+		return false
+	}
+	return true
 }

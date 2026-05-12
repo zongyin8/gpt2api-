@@ -1,20 +1,24 @@
-import { type FormEvent, useState } from 'react';
+import { FormEvent, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   BadgeDollarSign,
   ChevronDown,
+  Crown,
   FileText,
   Globe2,
-  KeyRound,
+  Inbox,
+  Layers,
   LayoutDashboard,
   LockKeyhole,
   LogOut,
   Menu,
+  Network,
   ReceiptText,
   Settings,
   Tag,
   Ticket,
   UserCircle2,
+  UserPlus,
   Users,
   Wallet,
   WalletCards,
@@ -27,22 +31,58 @@ import { authApi } from '../lib/services';
 import { useAuthStore } from '../stores/auth';
 import { toast } from '../stores/toast';
 
-const APP_VERSION = 'v2.0.1';
+const APP_VERSION = 'v2.0.3';
 
-const NAV = [
-  { to: '/dashboard', label: '仪表盘', icon: LayoutDashboard },
-  { to: '/accounts', label: 'Token 管理', icon: KeyRound },
-  { to: '/proxies', label: '代理管理', icon: Globe2 },
-  { to: '/users', label: '用户管理', icon: Users },
-  { to: '/billing', label: '充值消费', icon: Wallet },
-  { to: '/promo', label: '优惠码', icon: Tag },
-  { to: '/cdk', label: '兑换码 CDK', icon: Ticket },
-  { to: '/config', label: '系统配置', icon: Settings },
-  { to: '/billing-settings', label: '扣费设置', icon: ReceiptText },
-  { to: '/recharge-packages', label: '充值套餐', icon: WalletCards },
-  { to: '/model-prices', label: '模型价格', icon: BadgeDollarSign },
-  { to: '/logs', label: '请求日志', icon: FileText },
-] as const;
+type NavItem = { to: string; label: string; icon: typeof LayoutDashboard; end?: boolean };
+type NavGroup = { label: string; items: NavItem[] };
+
+// 分组规则：按"功能性"聚合，自上而下从总览到底层配置。
+const NAV_GROUPS: NavGroup[] = [
+  {
+    label: '总览',
+    items: [{ to: '/dashboard', label: '仪表盘', icon: LayoutDashboard }],
+  },
+  {
+    label: '号池与注册',
+    items: [
+      { to: '/pools', label: '号池管理', icon: Layers, end: true },
+      { to: '/pools/register', label: '号池注册', icon: UserPlus },
+      { to: '/plus-pool', label: 'Plus 升级资源池', icon: Crown },
+      { to: '/mail-pool', label: '邮箱池', icon: Inbox },
+    ],
+  },
+  {
+    label: '网关',
+    items: [
+      { to: '/upstreams', label: '上游 API', icon: Globe2 },
+      { to: '/proxies', label: '代理管理', icon: Network },
+    ],
+  },
+  {
+    label: '运营',
+    items: [
+      { to: '/users', label: '用户管理', icon: Users },
+      { to: '/billing', label: '充值消费', icon: Wallet },
+      { to: '/logs', label: '请求日志', icon: FileText },
+    ],
+  },
+  {
+    label: '营销',
+    items: [
+      { to: '/recharge-packages', label: '充值套餐', icon: WalletCards },
+      { to: '/promo', label: '优惠码', icon: Tag },
+      { to: '/cdk', label: '兑换码', icon: Ticket },
+    ],
+  },
+  {
+    label: '系统设置',
+    items: [
+      { to: '/model-prices', label: '模型价格', icon: BadgeDollarSign },
+      { to: '/billing-settings', label: '扣费规则', icon: ReceiptText },
+      { to: '/config', label: '系统配置', icon: Settings },
+    ],
+  },
+];
 
 export function AdminLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -50,12 +90,12 @@ export function AdminLayout() {
   const [passwordOpen, setPasswordOpen] = useState(false);
   const me = useAuthStore((s) => s.me);
   const logout = useAuthStore((s) => s.logout);
-  const navigate = useNavigate();
+  const nav = useNavigate();
 
   const handleLogout = () => {
     logout();
     toast.info('已退出登录');
-    navigate('/login', { replace: true });
+    nav('/login', { replace: true });
   };
 
   const displayName = me?.nickname || me?.username || '管理员';
@@ -78,36 +118,57 @@ export function AdminLayout() {
       <aside
         className={clsx(
           'flex-col border-r border-border bg-surface-1 lg:sticky lg:top-0 lg:flex lg:h-screen',
-          mobileOpen ? 'fixed inset-y-0 left-0 z-40 flex w-[260px] shadow-3' : 'hidden',
+          mobileOpen ? 'fixed inset-y-0 left-0 z-40 flex w-[86vw] max-w-[320px] shadow-3' : 'hidden',
         )}
       >
+        <div className="flex h-14 items-center justify-between border-b border-border px-4 lg:hidden">
+          <Logo size="sm" suffix="管理后台" />
+          <button
+            type="button"
+            aria-label="关闭菜单"
+            className="btn btn-ghost btn-icon btn-sm"
+            onClick={() => setMobileOpen(false)}
+          >
+            <X size={18} />
+          </button>
+        </div>
         <div className="hidden h-16 items-center border-b border-border px-5 lg:flex">
           <Logo suffix="管理后台" />
         </div>
-        <nav className="flex-1 space-y-1 overflow-y-auto p-3">
-          {NAV.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              onClick={() => setMobileOpen(false)}
-              className={({ isActive }) =>
-                clsx(
-                  'flex h-10 min-w-[44px] items-center gap-3 rounded-md px-3 text-small transition',
-                  isActive
-                    ? 'bg-klein-gradient text-text-on-klein shadow-glow-soft'
-                    : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary',
-                )
-              }
-            >
-              <Icon size={18} />
-              {label}
-            </NavLink>
+        <nav className="flex-1 space-y-3 overflow-y-auto px-3 py-3">
+          {NAV_GROUPS.map((group) => (
+            <div key={group.label} className="space-y-0.5">
+              <div className="px-3 pb-1 pt-1 text-tiny font-semibold uppercase tracking-wider text-text-tertiary">
+                {group.label}
+              </div>
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.end}
+                    onClick={() => setMobileOpen(false)}
+                    className={({ isActive }) =>
+                      clsx(
+                        'flex h-9 min-w-[44px] items-center gap-2.5 rounded-md px-3 text-small transition',
+                        isActive
+                          ? 'bg-klein-gradient text-text-on-klein shadow-glow-soft'
+                          : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary',
+                      )
+                    }
+                  >
+                    <Icon size={16} />
+                    {item.label}
+                  </NavLink>
+                );
+              })}
+            </div>
           ))}
         </nav>
         <div className="border-t border-border px-4 py-4 text-tiny text-text-tertiary">
           <div className="flex items-center gap-2">
-            <span>内部版本</span>
-            <span className="text-text-secondary">{APP_VERSION}</span>
+            <span>{APP_VERSION}</span>
           </div>
         </div>
       </aside>
@@ -141,7 +202,10 @@ export function AdminLayout() {
               <span className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-pill bg-klein-gradient text-small text-white">
                 {initial}
               </span>
-              <ChevronDown size={15} className={clsx('text-text-tertiary transition', menuOpen && 'rotate-180')} />
+              <ChevronDown
+                size={15}
+                className={clsx('text-text-tertiary transition', menuOpen && 'rotate-180')}
+              />
             </button>
 
             {menuOpen && (
@@ -230,13 +294,13 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-surface-overlay px-4">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-surface-overlay px-3 sm:px-4">
       <button className="absolute inset-0" type="button" aria-label="关闭" onClick={onClose} />
-      <form className="dialog-surface relative w-full max-w-md p-6" onSubmit={submit}>
+      <form className="dialog-surface relative w-full max-w-md p-4 sm:p-6" onSubmit={submit}>
         <div className="mb-5 flex items-center justify-between">
           <div>
             <h2 className="text-h3 text-text-primary">修改密码</h2>
-            <p className="mt-1 text-small text-text-tertiary">建议及时修改默认管理员密码。</p>
+            <p className="mt-1 text-small text-text-tertiary">建议及时修改默认密码。</p>
           </div>
           <button className="btn btn-ghost btn-icon btn-sm" type="button" onClick={onClose}>
             <X size={18} />
@@ -245,23 +309,41 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
         <div className="space-y-3">
           <label className="field">
             <span className="field-label">原密码</span>
-            <input className="input" type="password" value={oldPassword} onChange={(e) => setOldPassword(e.target.value)} autoComplete="current-password" />
+            <input
+              className="input"
+              type="password"
+              value={oldPassword}
+              onChange={(e) => setOldPassword(e.target.value)}
+              autoComplete="current-password"
+            />
           </label>
           <label className="field">
             <span className="field-label">新密码</span>
-            <input className="input" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} autoComplete="new-password" />
+            <input
+              className="input"
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              autoComplete="new-password"
+            />
           </label>
           <label className="field">
             <span className="field-label">确认新密码</span>
-            <input className="input" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+            <input
+              className="input"
+              type="password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              autoComplete="new-password"
+            />
           </label>
         </div>
-        <div className="mt-6 flex justify-end gap-2">
+        <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <button className="btn btn-outline btn-md" type="button" onClick={onClose}>
             取消
           </button>
           <button className="btn btn-primary btn-md" type="submit" disabled={saving}>
-            {saving ? '保存中…' : '保存修改'}
+            {saving ? '保存中...' : '保存修改'}
           </button>
         </div>
       </form>

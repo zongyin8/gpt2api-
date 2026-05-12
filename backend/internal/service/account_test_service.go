@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -108,33 +109,8 @@ func NewAccountTestService(
 }
 
 func (s *AccountTestService) resolveProxyURL(ctx context.Context, account *model.Account) (string, error) {
-	var (
-		p   *model.Proxy
-		err error
-	)
-	if account.ProxyID != nil {
-		p, err = s.proxySvc.GetByID(ctx, *account.ProxyID)
-	} else if s.cfgSvc.GlobalProxyEnabled(ctx) {
-		if s.cfgSvc.GlobalProxySelectionMode(ctx) == "random" {
-			p, err = s.proxySvc.PickEnabledRandom(ctx)
-		} else {
-			p, err = s.proxySvc.GetByID(ctx, s.cfgSvc.GlobalProxyID(ctx))
-		}
-	}
-	if err != nil {
-		return "", err
-	}
-	if p == nil || p.Status != model.ProxyStatusEnabled {
-		return "", nil
-	}
-	u, err := s.proxySvc.BuildURL(p)
-	if err != nil {
-		return "", err
-	}
-	if u == nil {
-		return "", nil
-	}
-	return u.String(), nil
+	proxyURL, _, err := resolveAccountProxyURL(ctx, s.proxySvc, s.cfgSvc, account, nil, false)
+	return proxyURL, err
 }
 
 func (s *AccountTestService) decryptCredential(account *model.Account) (string, error) {
@@ -178,7 +154,7 @@ func (s *AccountTestService) Test(ctx context.Context, account *model.Account) (
 			errMsg = errMsg[:250]
 		}
 		now := time.Now().UTC()
-		_ = s.accountRepo.Update(ctx, account.ID, map[string]any{
+		_ = s.accountRepo.UpdateForProvider(ctx, account.ID, account.Provider, map[string]any{
 			"last_test_at":         now,
 			"last_test_status":     model.AccountTestFail,
 			"last_test_latency_ms": 0,
@@ -205,6 +181,8 @@ func (s *AccountTestService) Test(ctx context.Context, account *model.Account) (
 		ok, errMsg, info = s.testGPT(ctx, account, proxyURL)
 	case model.ProviderGROK:
 		ok, errMsg, info = s.testGROK(ctx, account, proxyURL)
+	case model.ProviderPIC2API:
+		ok, errMsg, info = s.testPIC2API(ctx, account, proxyURL)
 	default:
 		return nil, errcode.InvalidParam.WithMsg("涓嶆敮鎸佺殑 provider: " + account.Provider)
 	}
@@ -224,10 +202,14 @@ func (s *AccountTestService) Test(ctx context.Context, account *model.Account) (
 		"last_test_latency_ms": latencyMs,
 		"last_test_error":      errMsg,
 	}
+	applyProbeRecovery(updates, account, ok)
+	if info != nil && info.ModelsFetched {
+		s.applySupportedModels(updates, info.SupportedModels)
+	}
 	if account.Provider == model.ProviderGROK && account.AuthType == model.AuthTypeCookie && ok {
 		updates["access_token_expires_at"] = now.Add(grokTokenTTL)
 	}
-	_ = s.accountRepo.Update(ctx, account.ID, updates)
+	_ = s.accountRepo.UpdateForProvider(ctx, account.ID, account.Provider, updates)
 
 	return &dto.AccountTestResp{
 		OK:                  ok,
@@ -238,7 +220,43 @@ func (s *AccountTestService) Test(ctx context.Context, account *model.Account) (
 		ImageQuotaRemaining: accountTestImageRemaining(info),
 		ImageQuotaTotal:     accountTestImageTotal(info),
 		ImageQuotaResetAt:   accountTestImageResetAt(info),
+		SupportedModels:     accountTestSupportedModels(info),
 	}, nil
+}
+
+func applyProbeRecovery(updates map[string]any, account *model.Account, ok bool) {
+	if !ok || updates == nil || account == nil {
+		return
+	}
+	if account.Status != model.AccountStatusBroken && account.CooldownUntil == nil && account.LastError == nil {
+		return
+	}
+	updates["status"] = model.AccountStatusEnabled
+	updates["cooldown_until"] = nil
+	updates["last_error"] = nil
+	updates["error_count"] = 0
+}
+
+func (s *AccountTestService) FetchSupportedModels(ctx context.Context, account *model.Account) (*dto.AccountModelsResp, error) {
+	proxyURL, err := s.resolveProxyURL(ctx, account)
+	if err != nil {
+		return nil, errcode.InvalidParam.WithMsg("代理配置不可用: " + err.Error())
+	}
+	if account.IsOAuth() {
+		if err := s.maybeRefresh(ctx, account, proxyURL); err != nil {
+			return nil, errcode.GPTUnavailable.Wrap(err)
+		}
+	}
+	models, err := s.fetchModelCatalog(ctx, account, proxyURL)
+	if err != nil {
+		return nil, errcode.GPTUnavailable.Wrap(err)
+	}
+	updates := map[string]any{}
+	s.applySupportedModels(updates, models)
+	if err := s.accountRepo.UpdateForProvider(ctx, account.ID, account.Provider, updates); err != nil {
+		return nil, errcode.DBError.Wrap(err)
+	}
+	return &dto.AccountModelsResp{SupportedModels: models}, nil
 }
 
 func (s *AccountTestService) testGPT(ctx context.Context, account *model.Account, proxyURL string) (bool, string, *accountTestInfo) {
@@ -284,7 +302,10 @@ func (s *AccountTestService) testGPT(ctx context.Context, account *model.Account
 		}
 		return false, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, msg), nil
 	}
-	return true, "", nil
+	return true, "", &accountTestInfo{
+		SupportedModels: parseModelCatalog(body),
+		ModelsFetched:   true,
+	}
 }
 
 type accountTestInfo struct {
@@ -294,6 +315,8 @@ type accountTestInfo struct {
 	ImageQuotaTotal     int
 	ImageQuotaResetAt   int64
 	BlockedFeatures     []string
+	SupportedModels     []string
+	ModelsFetched       bool
 }
 
 func (s *AccountTestService) testOpenAIOAuth(ctx context.Context, account *model.Account, proxyURL string) (bool, string, *accountTestInfo) {
@@ -530,7 +553,7 @@ func (s *AccountTestService) persistOAuthProbe(ctx context.Context, account *mod
 	}
 	meta["probed_at"] = time.Now().UTC().Unix()
 	raw, _ := json.Marshal(meta)
-	_ = s.accountRepo.Update(ctx, account.ID, map[string]any{"oauth_meta": string(raw)})
+	_ = s.accountRepo.UpdateForProvider(ctx, account.ID, account.Provider, map[string]any{"oauth_meta": string(raw)})
 }
 
 func (s *AccountTestService) testGROK(ctx context.Context, account *model.Account, proxyURL string) (bool, string, *accountTestInfo) {
@@ -580,7 +603,55 @@ func (s *AccountTestService) testGROK(ctx context.Context, account *model.Accoun
 		}
 		return false, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, msg), nil
 	}
-	return true, "", nil
+	return true, "", &accountTestInfo{
+		SupportedModels: parseModelCatalog(body),
+		ModelsFetched:   true,
+	}
+}
+
+func (s *AccountTestService) testPIC2API(ctx context.Context, account *model.Account, proxyURL string) (bool, string, *accountTestInfo) {
+	base := defaultProviderBaseURL(account.Provider)
+	if account.BaseURL != nil && *account.BaseURL != "" {
+		base = strings.TrimRight(*account.BaseURL, "/")
+	}
+	endpoint := base + "/v1/models"
+
+	authHeader, err := s.buildAuthHeader(account)
+	if err != nil {
+		return false, err.Error(), nil
+	}
+	client, err := outbound.NewClient(outbound.Options{
+		ProxyURL: proxyURL,
+		Timeout:  20 * time.Second,
+		Mode:     outbound.ModeUTLS,
+		Profile:  outbound.ProfileChrome,
+	})
+	if err != nil {
+		return false, err.Error(), nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err.Error(), nil
+	}
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Sprintf("请求失败: %v", err), nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode/100 != 2 {
+		msg := strings.TrimSpace(string(body))
+		if len(msg) > 200 {
+			msg = msg[:200]
+		}
+		return false, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, msg), nil
+	}
+	return true, "", &accountTestInfo{
+		SupportedModels: parseModelCatalog(body),
+		ModelsFetched:   true,
+	}
 }
 
 type grokRateLimitResp struct {
@@ -669,7 +740,7 @@ func (s *AccountTestService) testGrokSSO(ctx context.Context, account *model.Acc
 		meta["image_quota_reset_at"] = resetAt
 	}
 	raw, _ := json.Marshal(meta)
-	_ = s.accountRepo.Update(ctx, account.ID, map[string]any{"oauth_meta": string(raw)})
+	_ = s.accountRepo.UpdateForProvider(ctx, account.ID, account.Provider, map[string]any{"oauth_meta": string(raw)})
 
 	return &accountTestInfo{
 		PlanType:            plan,
@@ -765,6 +836,97 @@ func trimMsg(msg string, n int) string {
 	return msg
 }
 
+func (s *AccountTestService) fetchModelCatalog(ctx context.Context, account *model.Account, proxyURL string) ([]string, error) {
+	if account.AuthType == model.AuthTypeCookie {
+		return nil, errors.New("当前认证类型不支持通过 /v1/models 自动获取模型")
+	}
+	base := defaultProviderBaseURL(account.Provider)
+	if account.BaseURL != nil && strings.TrimSpace(*account.BaseURL) != "" {
+		base = strings.TrimRight(strings.TrimSpace(*account.BaseURL), "/")
+	}
+	authHeader, err := s.buildAuthHeader(account)
+	if err != nil {
+		return nil, err
+	}
+	client, err := outbound.NewClient(outbound.Options{
+		ProxyURL: proxyURL,
+		Timeout:  20 * time.Second,
+		Mode:     outbound.ModeUTLS,
+		Profile:  outbound.ProfileChrome,
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode/100 != 2 {
+		msg := strings.TrimSpace(string(body))
+		if len(msg) > 200 {
+			msg = msg[:200]
+		}
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, msg)
+	}
+	return parseModelCatalog(body), nil
+}
+
+func defaultProviderBaseURL(provider string) string {
+	switch provider {
+	case model.ProviderGROK:
+		return "https://api.x.ai"
+	case model.ProviderPIC2API:
+		return "https://pic2api.com"
+	default:
+		return "https://api.openai.com"
+	}
+}
+
+func parseModelCatalog(body []byte) []string {
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+	uniq := make(map[string]struct{}, len(payload.Data))
+	out := make([]string, 0, len(payload.Data))
+	for _, item := range payload.Data {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := uniq[id]; ok {
+			continue
+		}
+		uniq[id] = struct{}{}
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (s *AccountTestService) applySupportedModels(updates map[string]any, models []string) {
+	if updates == nil {
+		return
+	}
+	if models == nil {
+		models = []string{}
+	}
+	raw, _ := json.Marshal(models)
+	updates["model_whitelist"] = string(raw)
+}
+
 func (s *AccountTestService) buildAuthHeader(account *model.Account) (string, error) {
 	switch account.AuthType {
 	case model.AuthTypeAPIKey:
@@ -855,7 +1017,7 @@ func (s *AccountTestService) RefreshOAuth(ctx context.Context, account *model.Ac
 		if len(errMsg) > 250 {
 			errMsg = errMsg[:250]
 		}
-		_ = s.accountRepo.Update(ctx, account.ID, map[string]any{
+		_ = s.accountRepo.UpdateForProvider(ctx, account.ID, account.Provider, map[string]any{
 			"last_error":  errMsg,
 			"error_count": gorm.Expr("error_count + 1"),
 		})
@@ -896,7 +1058,7 @@ func (s *AccountTestService) RefreshOAuth(ctx context.Context, account *model.Ac
 	rawMeta, _ := json.Marshal(meta)
 	updates["oauth_meta"] = string(rawMeta)
 
-	if err := s.accountRepo.Update(ctx, account.ID, updates); err != nil {
+	if err := s.accountRepo.UpdateForProvider(ctx, account.ID, account.Provider, updates); err != nil {
 		return nil, errcode.DBError.Wrap(err)
 	}
 
@@ -1047,4 +1209,11 @@ func accountTestImageResetAt(info *accountTestInfo) int64 {
 		return 0
 	}
 	return info.ImageQuotaResetAt
+}
+
+func accountTestSupportedModels(info *accountTestInfo) []string {
+	if info == nil || len(info.SupportedModels) == 0 {
+		return nil
+	}
+	return append([]string(nil), info.SupportedModels...)
 }
