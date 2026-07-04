@@ -1,6 +1,6 @@
 # gpt2api / KleinAI
 
-> **最新版本：`v3.0.1`（多平台多通道聚合，全面更新）** —— 详见 [CHANGELOG](CHANGELOG.md)
+> **最新版本 / Latest: `v3.0.1`（多平台多通道聚合，全面更新 / multi-platform, multi-channel aggregation）** —— 详见 / see [CHANGELOG](CHANGELOG.md)
 
 > 一个面向多平台账号池 + 第三方上游 API 的 AIGC 聚合平台，提供图片、文字、视频、音乐的一站式生成能力。  
 > 前台面向创作，后台面向运营，开放 OpenAI / Gemini 兼容接口，方便直接接入现有 SDK。

@@ -62,3 +62,48 @@
 ## v1.0.x
 
 - 初始稳定版本，保留为历史基线，可通过 Git tag / 分支查看。
+
+---
+
+# Changelog (English)
+
+## v3.0.1 — Latest (multi-platform, multi-channel aggregation)
+
+> The newest update, touching nearly every module: new upstream platforms & channels, upstream API management & model routing, upstream billing & profit reports, cluster scheduling, music generation, Gemini-compatible API, and frontend i18n.
+
+### Upstreams & channels
+- Multi-platform: **GPT, GROK (Web), official xAI (api.x.ai), Adobe Firefly, pic2api, FlowMusic**.
+- Multiple channels per platform, auto-routed & auto-failover by priority / cost / availability:
+  - GPT: Web (chatgpt.com, pooled) + official API (api.openai.com, pay-as-you-go).
+  - GROK: Grok Web image/video (grok.com) + official xAI API (api.x.ai).
+  - Adobe Firefly: 1K / 2K / 4K credit tiers + CC Premium subscription amortization.
+  - pic2api: OpenAI-compatible external API (nano-banana / gpt-image-2 / gemini, etc.).
+  - FlowMusic: text-to-song.
+- **Upstream API management**: local account pool (`local_pool`) + external direct (`external_api`, plug in any OpenAI-compatible API with `base_url + api_key`).
+- **Model routing table**: `model_code` (with size / duration variant) → channel, with priority, cost multiplier and enable toggle.
+- **Upstream billing & profit**: per-channel billing modes (per-call / per-unit / per-token / per-credit / subscription / custom), automatic cost logging and profit reports.
+
+### Generation
+- Unified text, image, video and **music** pipelines.
+- OpenAI-compatible: added `POST /v1/music/generations`; video under both `/v1/video/...` and `/v1/videos/...`.
+- **Gemini-compatible**: `GET /v1beta/models`, `POST /v1beta/models/:model:generateContent`.
+
+### Scheduling & reliability
+- **Cluster scheduling**: multi-node registration, per-provider concurrency & scope, embedded agent in the control node.
+- Per-account concurrency control, auto retry / rotate / circuit-break / batch refresh / proxy rotation, banned-word pre-check.
+- Adobe Firefly anti-bot alignment (desktop Chrome fingerprint / header order / TLS fingerprint / ARP session); 408 triggers proxy rotation instead of disabling the account.
+
+### Admin / Frontend / Deploy
+- New admin pages for upstream channels, model routing, cluster nodes and profit reports.
+- Built-in **i18n** in the user frontend.
+- Single-host production stack `deploy/docker-compose.prod.yml` (Caddy auto TLS), scalable per-provider; all secrets via `.env`, repo keeps placeholders only.
+
+## v2.0.x
+
+- Unified text / image / video pipelines with account pool, proxy, refresh, circuit-breaking, rotation and usage checks.
+- Unified OpenAI-compatible API and admin operations (users, billing, CDK, promo codes, model prices, request logs, upstream logs).
+- Unified single-host Docker Compose deployment.
+
+## v1.0.x
+
+- Initial stable version, kept as the historical baseline (available via Git tag / branch).
